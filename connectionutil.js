@@ -440,6 +440,9 @@ async function sendViaHostBackend(baseUrl, apiKey, model, messages, maxTokens) {
         messages: messages,
         temperature: LLM_DEFAULTS.openaiTemperature,
         stream: false,
+        // 'quiet' = background request. TauriTavern then reports upstream errors
+        // as a 502 JSON error, not as fake assistant text with status 200.
+        type: 'quiet',
     };
     if (apiKey) {
         payload.custom_include_headers = { Authorization: `Bearer ${apiKey}` };
@@ -579,7 +582,12 @@ async function sendViaOpenAI(url, apiKey, model, systemPrompt, userPrompt, maxTo
             body: body,
         });
         // A 404/405 here usually means the /proxy route doesn't exist (proxy disabled)
-        if (response.status === 404 || response.status === 405) {
+        // HTML back means the host has no /proxy route and served a page instead
+        const proxyType = response.headers.get('content-type') || '';
+        if (response.ok && /text\/html/i.test(proxyType)) {
+            proxyProblem = 'CORS proxy route not available on this host (got HTML)';
+            response = null;
+        } else if (response.status === 404 || response.status === 405) {
             const text = await response.text().catch(() => '');
             proxyProblem = `CORS proxy returned ${response.status}${text ? `: ${text.slice(0, 200)}` : ''}`;
             response = null;
