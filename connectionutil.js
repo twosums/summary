@@ -449,7 +449,8 @@ async function sendViaOpenAI(url, apiKey, model, systemPrompt, userPrompt, maxTo
     // Build the endpoint URL
     let endpoint = baseUrl;
     if (!endpoint.endsWith('/chat/completions')) {
-        if (endpoint.endsWith('/v1')) {
+        if (/\/v\d+$/.test(endpoint)) {
+            // Base ends in /v1, /v4, etc.: just add the path
             endpoint += '/chat/completions';
         } else if (!endpoint.includes('/chat/completions')) {
             endpoint += '/v1/chat/completions';
