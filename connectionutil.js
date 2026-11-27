@@ -423,6 +423,78 @@ export async function fetchOllamaModels(url) {
 // ─── Mode 4: OpenAI Compatible (Streaming) ──────────────────────────
 
 /**
+ * Send the request through the host app's own chat-completion backend
+ * (POST /api/backends/chat-completions/generate, source "custom").
+ * The host's server/native layer makes the HTTP call, so browser CORS rules
+ * don't apply. Works in SillyTavern and in TauriTavern (which has no /proxy route
+ * and no editable config.yaml). The API key is passed per-request as a header,
+ * so the user's saved Custom key in API Connections is not touched.
+ *
+ * @returns {Promise<string|null>} The completion text, or null if the route is unavailable.
+ */
+async function sendViaHostBackend(baseUrl, apiKey, model, messages, maxTokens) {
+    const payload = {
+        chat_completion_source: 'custom',
+        custom_url: baseUrl,
+        model: model,
+        messages: messages,
+        temperature: LLM_DEFAULTS.openaiTemperature,
+        stream: false,
+    };
+    if (apiKey) {
+        payload.custom_include_headers = { Authorization: `Bearer ${apiKey}` };
+    }
+    if (maxTokens && maxTokens > 0) {
+        payload.max_tokens = maxTokens;
+    }
+
+    let response;
+    try {
+        response = await fetch('/api/backends/chat-completions/generate', {
+            method: 'POST',
+            headers: getProxyHeaders(),
+            body: JSON.stringify(payload),
+        });
+    } catch (e) {
+        console.warn(`${MODULE_NAME} Host backend route unreachable, falling back:`, e.message);
+        return null;
+    }
+
+    // Route missing on this host: fall back to proxy/direct
+    if (response.status === 404 || response.status === 405) {
+        return null;
+    }
+
+    const text = await response.text().catch(() => '');
+    let data = null;
+    try { data = JSON.parse(text); } catch { /* not JSON */ }
+
+    const errorMessage = data?.error?.message || (typeof data?.error === 'string' ? data.error : '') || data?.message;
+    if (!response.ok || data?.error) {
+        const status = response.status;
+        throw new ConnectionError(
+            `OpenAI Compatible request failed (${status}): ${errorMessage || text || 'Unknown error'}`,
+            { retryable: status >= 500 || status === 429, status }
+        );
+    }
+
+    const content = data?.choices?.[0]?.message?.content
+        ?? data?.choices?.[0]?.text
+        ?? '';
+    const finalText = Array.isArray(content)
+        ? content.map(p => (typeof p === 'string' ? p : p?.text || '')).join('')
+        : String(content);
+
+    if (!finalText.trim()) {
+        throw new ConnectionError(
+            'OpenAI Compatible endpoint returned an empty response.',
+            { retryable: true }
+        );
+    }
+    return finalText;
+}
+
+/**
  * Send a request to any OpenAI-compatible endpoint using streaming.
  * Streaming avoids the non-streaming token ceiling (4096 on many providers)
  * and allows reasoning models to complete their full thinking + output.
@@ -484,6 +556,15 @@ async function sendViaOpenAI(url, apiKey, model, systemPrompt, userPrompt, maxTo
     }
 
     const body = JSON.stringify(requestBody);
+
+    // 1) Preferred: let the host app (SillyTavern / TauriTavern) make the call.
+    const hostBaseUrl = endpoint.replace(/\/chat\/completions$/, '');
+    const hostResult = await sendViaHostBackend(hostBaseUrl, apiKey, model, requestBody.messages, tokenLimit);
+    if (hostResult !== null) {
+        return hostResult;
+    }
+
+    // 2) Fallback: ST CORS proxy, then direct browser fetch (streaming).
 
     // Route every endpoint (local or remote) through ST's CORS proxy first.
     // Browsers block direct calls to most hosted APIs (e.g. api.z.ai), so the
