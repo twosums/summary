@@ -458,9 +458,6 @@ async function sendViaOpenAI(url, apiKey, model, systemPrompt, userPrompt, maxTo
     }
 
 
-    // Decide whether to use CORS proxy
-    const isLocal = /^https?:\/\/(localhost|127\.0\.0\.1|192\.168\.\d+\.\d+|10\.\d+\.\d+\.\d+|172\.(1[6-9]|2\d|3[01])\.\d+\.\d+)(:\d+)?/i.test(endpoint);
-
     const headers = {
         'Content-Type': 'application/json',
     };
@@ -488,32 +485,31 @@ async function sendViaOpenAI(url, apiKey, model, systemPrompt, userPrompt, maxTo
 
     const body = JSON.stringify(requestBody);
 
+    // Route every endpoint (local or remote) through ST's CORS proxy first.
+    // Browsers block direct calls to most hosted APIs (e.g. api.z.ai), so the
+    // server-side proxy is needed. Requires enableCorsProxy: true in config.yaml.
+    // Falls back to a direct browser fetch if the proxy is off or unreachable.
     let response;
-    if (isLocal) {
-        try {
-            response = await fetch(proxiedUrl(endpoint), {
-                method: 'POST',
-                headers: { ...getProxyHeaders(), ...headers },
-                                   body: body,
-            });
-        } catch (proxyError) {
-            console.warn(`${MODULE_NAME} CORS proxy failed for OpenAI endpoint, trying direct:`, proxyError.message);
-            try {
-                response = await fetch(endpoint, {
-                    method: 'POST',
-                    headers: headers,
-                    body: body,
-                });
-            } catch (directError) {
-                throw new ConnectionError(
-                    `Failed to connect to ${baseUrl}. ` +
-                    `Enable the CORS proxy in config.yaml (enableCorsProxy: true). ` +
-                    `Proxy error: ${proxyError.message}. Direct error: ${directError.message}`,
-                    { retryable: true }
-                );
-            }
+    let proxyProblem = null;
+    try {
+        response = await fetch(proxiedUrl(endpoint), {
+            method: 'POST',
+            headers: { ...getProxyHeaders(), ...headers },
+            body: body,
+        });
+        // A 404/405 here usually means the /proxy route doesn't exist (proxy disabled)
+        if (response.status === 404 || response.status === 405) {
+            const text = await response.text().catch(() => '');
+            proxyProblem = `CORS proxy returned ${response.status}${text ? `: ${text.slice(0, 200)}` : ''}`;
+            response = null;
         }
-    } else {
+    } catch (proxyError) {
+        proxyProblem = proxyError.message;
+        response = null;
+    }
+
+    if (!response) {
+        console.warn(`${MODULE_NAME} CORS proxy unavailable for OpenAI endpoint (${proxyProblem}), trying direct`);
         try {
             response = await fetch(endpoint, {
                 method: 'POST',
@@ -522,7 +518,9 @@ async function sendViaOpenAI(url, apiKey, model, systemPrompt, userPrompt, maxTo
             });
         } catch (directError) {
             throw new ConnectionError(
-                `Failed to connect to ${baseUrl}: ${directError.message}`,
+                `Failed to connect to ${endpoint}. ` +
+                `Set enableCorsProxy: true in SillyTavern's config.yaml and restart SillyTavern. ` +
+                `Proxy error: ${proxyProblem}. Direct error: ${directError.message}`,
                 { retryable: true }
             );
         }
